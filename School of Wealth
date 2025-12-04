@@ -1,0 +1,524 @@
+#!/usr/bin/env bash
+# init_and_push.sh
+#
+# Creates the repository files for Student Investing Coach (app.py, engine.py, data.py,
+# education.py, README.md, requirements.txt, .gitignore, and CI workflow).
+#
+# Usage:
+# 1) Edit ORIGIN_URL below to your repo URL (or pass it as the first argument).
+#    Example: https://github.com/aqeelmujtabakarim/student_investing_app.git
+# 2) Run locally: bash init_and_push.sh
+#
+# The script will:
+# - create the files in the current working directory (overwriting if they exist),
+# - initialize git if needed,
+# - create a main branch and commit files,
+# - create an add-all-code branch,
+# - if ORIGIN_URL is set it will add the remote and push main and add-all-code.
+#
+# NOTE: Pushing requires you to have git credentials configured (SSH key or HTTPS auth).
+set -euo pipefail
+
+# Accept origin as first arg or edit here:
+ORIGIN_URL="${1:-https://github.com/aqeelmujtabakarim/student_investing_app.git}"
+
+echo "Using origin: $ORIGIN_URL"
+
+cat > README.md <<'README'
+# Student Investing Coach (preview)
+
+This repository contains a small Streamlit app designed as an educational "student investing coach" that suggests ETFs and blue-chip stocks, explains factor weights, and includes short lessons and a journal.
+
+Features
+- Personalized suggestions driven by simple factor scoring (momentum, volatility, value, quality, dividends).
+- Learn tab with short lessons, glossary, and quizzes.
+- Paper-trading journal for keeping mock notes and allocations.
+- CI workflow that runs a smoke-test import check.
+
+How to run locally
+
+1. Create and activate a virtual environment
+   - python -m venv .venv
+   - source .venv/bin/activate  (macOS / Linux)
+   - .venv\Scripts\activate      (Windows)
+
+2. Install dependencies
+   - pip install -r requirements.txt
+
+3. Run the Streamlit app
+   - streamlit run app.py
+
+Notes and tips
+- The engine uses yfinance for price and fundamentals data. Network access is recommended; yfinance may be rate-limited and fetching many tickers can be slow.
+- For a quick demo, use the default universe in the sidebar or enter a short comma-separated ticker list.
+- This project is for educational purposes only and is not financial advice.
+
+CI
+- A GitHub Actions workflow (.github/workflows/ci.yml) is included to install dependencies and run a smoke-test import check on pushes and PRs.
+
+Contributing
+- Feel free to open issues or PRs to improve the scoring logic, add tests, or optimize data fetching (e.g., batched downloads or caching).
+
+License
+- Add a LICENSE file if you want to set a license for this repository.
+README
+
+cat > app.py <<'PY'
+import streamlit as st
+from engine import Profile, suggest, make_weights
+from data import TICKERS_DEFAULT, validate_tickers
+from education import lessons, glossary, quiz_bank
+import pandas as pd
+
+st.set_page_config(page_title="Student Investing Coach", page_icon="🎓", layout="wide")
+
+# Sidebar: Profile
+st.sidebar.title("Your investing profile")
+risk = st.sidebar.selectbox("Risk tolerance", ["low", "medium", "high"], index=1)
+vision = st.sidebar.selectbox("Vision focus", ["balanced", "growth", "income", "value"], index=0)
+mode = st.sidebar.radio("Suggestion mode", ["balanced", "growth", "income", "value"], index=0)
+horizon = st.sidebar.slider("Time horizon (years)", 1, 30, 10)
+quality_bias = st.sidebar.slider("Quality bias (0=none, 1=strong)", 0.0, 1.0, 0.6, 0.1)
+
+use_default = st.sidebar.checkbox("Use default universe (ETFs + blue chips)", value=True)
+user_universe = st.sidebar.text_area("Or paste tickers (comma-separated)", value="")
+
+tickers = TICKERS_DEFAULT() if use_default else validate_tickers(user_universe)
+profile = Profile(risk_tolerance=risk, vision_focus=vision, horizon_years=horizon, quality_bias=quality_bias, mode=mode)
+
+st.title("🎓 Student Investing Coach")
+st.write("Learn by doing: personalized suggestions across ETFs and blue-chip stocks, with clear reasons you can trust.")
+
+tab_suggest, tab_explain, tab_learn, tab_journal = st.tabs(["Suggestions", "Factor breakdown", "Learn", "Journal"]) 
+
+with tab_suggest:
+    st.subheader("Top suggestions for your profile")
+    top_n = st.slider("Number of suggestions", 5, 24, 12)
+    ranked, raw, weights = suggest(profile, tickers, top_n=top_n)
+
+    def tag_row(r):
+        tags = []
+        if r.get("DivZ", 0) > 0.5: tags.append("Income")
+        if r.get("MomentumZ", 0) > 0.5: tags.append("Momentum")
+        if r.get("FPEinvZ", 0) > 0.5 or r.get("PBinvZ", 0) > 0.5 or r.get("CFYZ", 0) > 0.5: tags.append("Value")
+        return ", ".join(tags) if tags else "Balanced"
+
+    ranked_display = ranked.copy()
+    ranked_display["Tags"] = ranked_display.apply(tag_row, axis=1)
+    st.dataframe(ranked_display[["Ticker","Score","RiskClass","Tags","Reasons"]], use_container_width=True)
+
+with tab_explain:
+    st.subheader("Your factor weights")
+    weights_df = pd.DataFrame({"Factor": list(weights.keys()), "Weight": [round(v,3) for v in weights.values()]})
+    st.table(weights_df)
+
+    st.markdown("#### Factor glossary")
+    for term, desc in glossary().items():
+        st.markdown(f"- **{term}:** {desc}")
+
+with tab_learn:
+    st.subheader("Learn mode")
+    topic = st.selectbox("Pick a topic", list(lessons().keys()))
+    st.markdown(lessons()[topic]["content"])
+    q = quiz_bank()[topic]
+    # quiz_bank items use different shapes; handle both styles
+    choices = q.get("choices") or q.get("choices", [])
+    answer_key = q.get("answer")
+    ans = st.radio("Quiz", choices)
+    if st.button("Check answer"):
+        if ans == answer_key:
+            st.success("Correct!")
+        else:
+            st.error("Not quite—review the lesson.")
+        st.info(q.get("explanation", ""))
+
+with tab_journal:
+    st.subheader("Paper-trading journal")
+    if "journal" not in st.session_state:
+        st.session_state["journal"] = []
+    entry_ticker = st.text_input("Ticker")
+    entry_alloc = st.slider("Mock allocation (%)", 0, 100, 5)
+    entry_thesis = st.text_area("Thesis")
+    entry_risks = st.text_area("Risks")
+    if st.button("Add entry"):
+        st.session_state["journal"].append({
+            "Ticker": entry_ticker.strip().upper(),
+            "Allocation%": entry_alloc,
+            "Thesis": entry_thesis,
+            "Risks": entry_risks
+        })
+        st.success("Journal entry added.")
+    if st.session_state["journal"]:
+        st.dataframe(pd.DataFrame(st.session_state["journal"]), use_container_width=True)
+
+st.caption("Educational app. Not financial advice.")
+PY
+
+cat > engine.py <<'PY'
+# engine.py
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+import yfinance as yf
+
+class Profile:
+    def __init__(self, risk_tolerance="medium", vision_focus="balanced", horizon_years=10, quality_bias=0.6, mode="balanced"):
+        # mode: "balanced" | "growth" | "income" | "value"
+        self.risk_tolerance = risk_tolerance
+        self.vision_focus = vision_focus
+        self.horizon_years = horizon_years
+        self.quality_bias = np.clip(quality_bias, 0.0, 1.0)
+        self.mode = mode
+
+def make_weights(profile: Profile):
+    weights = {
+        "vol": 0.35, "drawdown": 0.25, "momentum": 0.3,
+        "div_yield": 0.2, "rev_growth": 0.25, "eps_growth": 0.25, "quality": 0.2,
+        "val_fpe_inv": 0.25, "val_pb_inv": 0.15, "val_cfy": 0.2
+    }
+
+    # Risk tolerance
+    if profile.risk_tolerance == "low":
+        weights["vol"] = 0.55; weights["drawdown"] = 0.45
+        weights["momentum"] = max(0.2, weights["momentum"] - 0.1)
+    elif profile.risk_tolerance == "high":
+        weights["vol"] = 0.2; weights["drawdown"] = 0.15
+        weights["momentum"] = max(0.45, weights["momentum"]); weights["rev_growth"] += 0.05; weights["eps_growth"] += 0.05
+
+    # Vision focus
+    if profile.vision_focus == "income":
+        weights["div_yield"] = 0.45; weights["quality"] += 0.1
+        weights["momentum"] = max(0.2, weights["momentum"] - 0.05)
+    elif profile.vision_focus == "growth":
+        weights["momentum"] = max(0.4, weights["momentum"])
+        weights["rev_growth"] = max(0.35, weights["rev_growth"]); weights["eps_growth"] = max(0.35, weights["eps_growth"])
+        weights["div_yield"] = 0.1
+
+    # Mode tilts
+    if profile.mode == "value":
+        weights["val_fpe_inv"] += 0.25; weights["val_pb_inv"] += 0.15; weights["val_cfy"] += 0.15
+        weights["momentum"] = max(0.25, weights["momentum"] - 0.1)
+    elif profile.mode == "growth":
+        weights["momentum"] += 0.15; weights["rev_growth"] += 0.1; weights["eps_growth"] += 0.1
+    elif profile.mode == "income":
+        weights["div_yield"] += 0.2; weights["quality"] += 0.1
+
+    # Horizon tilt
+    if profile.horizon_years <= 3:
+        weights["momentum"] += 0.1; weights["drawdown"] += 0.05
+    elif profile.horizon_years >= 10:
+        weights["quality"] += profile.quality_bias * 0.2
+        weights["rev_growth"] += 0.05; weights["eps_growth"] += 0.05
+
+    # Normalize
+    s = sum(weights.values())
+    for k in weights:
+        weights[k] = weights[k] * (2.0 / s)
+    return weights
+
+# ----- Helpers & factors -----
+def fetch_price_history(ticker, lookback_days=365*3):
+    end = datetime.now(); start = end - timedelta(days=lookback_days)
+    try:
+        data = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=True)
+        return data["Close"].dropna()
+    except Exception:
+        return pd.Series(dtype=float)
+
+def calc_momentum(close):
+    if len(close) < 260: return np.nan
+    recent = close.iloc[-21]; past = close.iloc[-252-21]
+    return (recent - past) / past
+
+def calc_volatility(close):
+    returns = close.pct_change().dropna()
+    if len(returns) < 100: return np.nan
+    return returns.std() * np.sqrt(252)
+
+def calc_max_drawdown(close):
+    if len(close) < 100: return np.nan
+    cummax = close.cummax(); dd = (close / cummax) - 1.0
+    return dd.min()
+
+def fetch_info(ticker):
+    try:
+        return yf.Ticker(ticker).info
+    except Exception:
+        return {}
+
+def valuation_metrics(info):
+    # Inverse forward P/E and P/B; cash flow yield
+    fpe = info.get("forwardPE", np.nan)
+    pb = info.get("priceToBook", np.nan)
+    ocf = info.get("operatingCashflow", np.nan)
+    mcap = info.get("marketCap", np.nan)
+
+    fpe_inv = 1.0 / fpe if fpe and fpe > 0 else np.nan
+    pb_inv = 1.0 / pb if pb and pb > 0 else np.nan
+    cfy = (ocf / mcap) if ocf and mcap and mcap > 0 else np.nan
+    return fpe_inv, pb_inv, cfy
+
+def fundamentals(info, tk_obj):
+    # Revenue/EPS growth proxies + quality margins
+    margin = info.get("profitMargins", np.nan)
+    rev_g = np.nan; eps_g = np.nan
+    try:
+        fin = tk_obj.financials; qfin = tk_obj.quarterly_financials
+        if fin is not None and "Total Revenue" in fin.index:
+            rev_series = fin.loc["Total Revenue"].dropna().astype(float)
+            if len(rev_series) >= 2:
+                rev_g = (rev_series.iloc[0] - rev_series.iloc[1]) / abs(rev_series.iloc[1])
+        if qfin is not None and "Net Income" in qfin.index:
+            ni = qfin.loc["Net Income"].dropna().astype(float)
+            if len(ni) >= 4:
+                eps_g = (ni.iloc[0] - ni.iloc[3]) / (abs(ni.iloc[3]) + 1e-9)
+    except Exception:
+        pass
+    return rev_g, eps_g, margin
+
+def fetch_div_yield(info):
+    dy = info.get("dividendYield", np.nan)
+    return dy if dy is not None else np.nan
+
+def zscore(series):
+    s = pd.Series(series).astype(float); mu = s.mean(); sd = s.std()
+    if np.isnan(sd) or sd == 0: return pd.Series([0.0]*len(s), index=s.index)
+    return (s - mu) / sd
+
+def compute_scores(profile: Profile, tickers):
+    weights = make_weights(profile)
+    metrics = {k: {} for k in ["momentum","vol","drawdown","div_yield","rev_growth","eps_growth","quality","val_fpe_inv","val_pb_inv","val_cfy"]}
+
+    for t in tickers:
+        close = fetch_price_history(t)
+        m = calc_momentum(close); v = calc_volatility(close); dd = calc_max_drawdown(close)
+        tk = yf.Ticker(t); info = fetch_info(t)
+        dy = fetch_div_yield(info)
+        rg, eg, ql = fundamentals(info, tk)
+        fpe_inv, pb_inv, cfy = valuation_metrics(info)
+
+        metrics["momentum"][t] = m; metrics["vol"][t] = v; metrics["drawdown"][t] = dd
+        metrics["div_yield"][t] = dy; metrics["rev_growth"][t] = rg; metrics["eps_growth"][t] = eg; metrics["quality"][t] = ql
+        metrics["val_fpe_inv"][t] = fpe_inv; metrics["val_pb_inv"][t] = pb_inv; metrics["val_cfy"][t] = cfy
+
+    df = pd.DataFrame({k: pd.Series(v) for k, v in metrics.items()})
+    zdf = df.apply(zscore, axis=0)
+
+    score = (
+        weights["momentum"] * zdf["momentum"] +
+        (-weights["vol"]) * zdf["vol"] +
+        (-weights["drawdown"]) * zdf["drawdown"] +
+        weights["div_yield"] * zdf["div_yield"] +
+        weights["rev_growth"] * zdf["rev_growth"] +
+        weights["eps_growth"] * zdf["eps_growth"] +
+        weights["quality"] * zdf["quality"] +
+        weights["val_fpe_inv"] * zdf["val_fpe_inv"] +
+        weights["val_pb_inv"] * zdf["val_pb_inv"] +
+        weights["val_cfy"] * zdf["val_cfy"]
+    )
+
+    out = zdf.copy(); out["score"] = score
+    out = out.replace([np.inf, -np.inf], np.nan).dropna(subset=["score"]).sort_values("score", ascending=False)
+
+    def classify_risk(vol):
+        if pd.isna(vol): return "unknown"
+        if vol <= 0.20: return "low"
+        if vol <= 0.35: return "medium"
+        return "high"
+
+    rows = []
+    for t, row in out.iterrows():
+        reasons = []
+        if row["momentum"] > 0.5:
+            reasons.append("Positive 12-month momentum")
+        if row["div_yield"] > 0.5:
+            reasons.append("Above-average dividend yield")
+        if row["rev_growth"] > 0.5 or row["eps_growth"] > 0.5:
+            reasons.append("Solid fundamental growth")
+        if row["quality"] > 0.3:
+            reasons.append("Healthy profit margins")
+        # Value-specific reasons
+        if row["val_fpe_inv"] > 0.5 or row["val_pb_inv"] > 0.5 or row["val_cfy"] > 0.5:
+            reasons.append("Value signals: cheaper vs. peers or stronger cash flow yield")
+        if row["vol"] < -0.3:
+            reasons.append("Lower volatility vs. peers")
+        if row["drawdown"] > 0.3:
+            reasons.append("Shallower historical drawdowns")
+
+        rows.append({
+            "Ticker": t,
+            "Score": round(row["score"], 3),
+            "RiskClass": classify_risk(df.loc[t, "vol"]),
+            "MomentumZ": round(row["momentum"], 2),
+            "VolZ": round(row["vol"], 2),
+            "DDZ": round(row["drawdown"], 2),
+            "DivZ": round(row["div_yield"], 2),
+            "RevZ": round(row["rev_growth"], 2),
+            "EPSZ": round(row["eps_growth"], 2),
+            "QZ": round(row["quality"], 2),
+            "FPEinvZ": round(row["val_fpe_inv"], 2),
+            "PBinvZ": round(row["val_pb_inv"], 2),
+            "CFYZ": round(row["val_cfy"], 2),
+            "Reasons": "; ".join(reasons) if reasons else "Balanced factor profile"
+        })
+
+    ranked = pd.DataFrame(rows)
+    return ranked, df, weights
+
+def suggest(profile: Profile, tickers, top_n=12):
+    ranked, raw, weights = compute_scores(profile, tickers)
+    return ranked.head(top_n), raw, weights
+PY
+
+cat > data.py <<'PY'
+def TICKERS_DEFAULT():
+    return [
+        "SPY","QQQ","IWD","IWF","XLV","XLE","XLF","XLK",
+        "AAPL","MSFT","GOOGL","AMZN","NVDA","META",
+        "BRK-B","JPM","V","MA","KO","PEP","PG","JNJ","MRK","PFE",
+        "WMT","HD","COST","MCD","DIS","NKE",
+        "XOM","CVX","ABBV","TMO","CSCO","ORCL",
+        "RY.TO","TD.TO","BNS.TO","BMO.TO","CM.TO",
+        "ENB.TO","TRP.TO","CNQ.TO","SU.TO","BCE.TO","T.TO"
+    ]
+
+def validate_tickers(csv_str):
+    tickers = [t.strip().upper() for t in csv_str.split(",") if t.strip()]
+    return tickers if tickers else TICKERS_DEFAULT()
+PY
+
+cat > education.py <<'PY'
+def glossary():
+    return {
+        "Momentum": "Price trend over the past year.",
+        "Volatility": "How much a stock’s price fluctuates.",
+        "Max drawdown": "Largest drop from a peak.",
+        "Dividend yield": "Cash returned to shareholders.",
+        "Revenue/EPS growth": "Business expansion signals.",
+        "Quality": "Profit margins as stability proxy.",
+        "Forward P/E": "Price vs. expected earnings.",
+        "Price-to-book": "Price vs. net asset value.",
+        "Cash flow yield": "Cash generation vs. market value."
+    }
+
+def lessons():
+    return {
+        "Risk vs. return": {"content": "Higher returns usually mean higher risk. Diversify and match risk to horizon."},
+        "Growth vs. income": {"content": "Growth = momentum/fundamentals. Income = dividends/stability."},
+        "Value vs. quality": {"content": "Cheap stocks need quality checks. Value + strong margins = opportunity."}
+    }
+
+def quiz_bank():
+    return {
+        "Risk vs. return": {
+            "question": "Higher volatility usually means…",
+            "choices": ["Lower swings","Higher swings","Guaranteed loss","Guaranteed profit"],
+            "answer": "Higher swings",
+            "explanation": "Volatility = bigger ups and downs."
+        },
+        "Growth vs. income": {
+            "question": "Which factor aligns with income investing?",
+            "choices": ["Revenue growth","Dividend yield","Momentum","EPS growth"],
+            "answer": "Dividend yield",
+            "explanation": "Income investing emphasizes dividends."
+        },
+        "Value vs. quality": {
+            "question": "Cheap + weak quality is…",
+            "choices": ["Opportunity","Trap","Safe","Guaranteed profit"],
+            "answer": "Trap",
+            "explanation": "Low valuation without quality is risky."
+        }
+    }
+PY
+
+cat > requirements.txt <<'PY'
+streamlit>=1.0
+pandas>=1.3
+numpy>=1.21
+yfinance>=0.2
+PY
+
+cat > .gitignore <<'PY'
+__pycache__/
+.venv/
+.env
+*.pyc
+.DS_Store
+PY
+
+mkdir -p .github/workflows
+cat > .github/workflows/ci.yml <<'YML'
+name: CI
+
+on:
+  push:
+    branches: [ main, add-all-code ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    - name: Smoke test imports
+      run: |
+        python - <<'PY'
+        import sys
+        try:
+            import pandas, numpy, streamlit, yfinance
+            print('imports ok')
+        except Exception as e:
+            print('import failure:', e)
+            sys.exit(1)
+        PY
+YML
+
+echo "Wrote files to $(pwd):"
+ls -1
+
+# Git initialization and pushing
+if [ ! -d .git ]; then
+  git init
+  echo "Initialized empty git repository."
+fi
+
+# Create initial commit on main
+git add .
+git commit -m "Initial commit: add app, engine, data, education, CI, README, requirements" || true
+git branch -M main || true
+
+if [ -n "$ORIGIN_URL" ]; then
+  if git remote get-url origin >/dev/null 2>&1; then
+    echo "origin remote already set"
+  else
+    git remote add origin "$ORIGIN_URL" || true
+    echo "Added remote origin $ORIGIN_URL"
+  fi
+
+  echo "Pushing main branch..."
+  git push -u origin main || echo "Failed to push main (check credentials/remote). You can push manually."
+
+  # create and push add-all-code branch
+  git checkout -b add-all-code || git checkout add-all-code || true
+  git push -u origin add-all-code || echo "Failed to push add-all-code (check credentials/remote). You can push manually."
+else
+  echo ""
+  echo "ORIGIN_URL is empty. To push to GitHub, run these commands:"
+  echo "  git remote add origin https://github.com/yourname/yourrepo.git"
+  echo "  git push -u origin main"
+  echo "  git checkout -b add-all-code"
+  echo "  git push -u origin add-all-code"
+fi
+
+echo ""
+echo "Done. If you want a PR created from add-all-code -> main you can create it on GitHub web UI."
